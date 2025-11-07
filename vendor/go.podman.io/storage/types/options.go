@@ -63,6 +63,18 @@ func loadDefaultStoreOptions() {
 		if defaultStoreOptions.GraphRoot == "" {
 			defaultStoreOptions.GraphRoot = defaultGraphRoot
 		}
+		// Check environment variables for blob cache (even if not in config file)
+		if blobCacheDir, ok := os.LookupEnv("CONTAINERS_BLOB_CACHE_DIR"); ok {
+			logrus.Debugf("CONTAINERS_BLOB_CACHE_DIR environment variable found: %q", blobCacheDir)
+			defaultStoreOptions.BlobCacheDir = blobCacheDir
+		}
+		if blobCacheRole, ok := os.LookupEnv("CONTAINERS_BLOB_CACHE_ROLE"); ok {
+			logrus.Debugf("CONTAINERS_BLOB_CACHE_ROLE environment variable found: %q", blobCacheRole)
+			defaultStoreOptions.BlobCacheRole = blobCacheRole
+		} else if defaultStoreOptions.BlobCacheDir != "" {
+			// Default to "reader" if dir is set but role is not
+			defaultStoreOptions.BlobCacheRole = "reader"
+		}
 	}
 	setDefaults()
 
@@ -202,6 +214,21 @@ func loadStoreOptionsFromConfFile(storageConf string) (StoreOptions, error) {
 		storageOpts.RootlessStoragePath = storagePath
 	}
 
+	// Environment variable overrides for blob cache (check every time, not just on init)
+	// This ensures environment variables work for different users and when set after initialization
+	if blobCacheDir, ok := os.LookupEnv("CONTAINERS_BLOB_CACHE_DIR"); ok {
+		logrus.Debugf("Environment variable CONTAINERS_BLOB_CACHE_DIR=%q overriding config value %q in loadStoreOptionsFromConfFile", blobCacheDir, storageOpts.BlobCacheDir)
+		storageOpts.BlobCacheDir = blobCacheDir
+	}
+	if blobCacheRole, ok := os.LookupEnv("CONTAINERS_BLOB_CACHE_ROLE"); ok {
+		logrus.Debugf("Environment variable CONTAINERS_BLOB_CACHE_ROLE=%q overriding config value %q in loadStoreOptionsFromConfFile", blobCacheRole, storageOpts.BlobCacheRole)
+		storageOpts.BlobCacheRole = blobCacheRole
+	} else if storageOpts.BlobCacheDir != "" && storageOpts.BlobCacheRole == "" {
+		// Default to "reader" if dir is set but role is not
+		storageOpts.BlobCacheRole = "reader"
+		logrus.Debugf("Defaulting BlobCacheRole to 'reader' in loadStoreOptionsFromConfFile since BlobCacheDir is set but role is not")
+	}
+
 	if storageOpts.ImageStore != "" && storageOpts.ImageStore == storageOpts.GraphRoot {
 		return storageOpts, fmt.Errorf("imagestore %s must either be not set or be a different than graphroot", storageOpts.ImageStore)
 	}
@@ -270,6 +297,13 @@ type StoreOptions struct {
 	DisableVolatile bool `json:"disable-volatile,omitempty"`
 	// If transient, don't persist containers over boot (stores db in runroot)
 	TransientStore bool `json:"transient_store,omitempty"`
+	// BlobCacheDir is the directory for caching uncompressed blob files
+	// to avoid re-processing them for each user. If empty, blob caching is disabled.
+	BlobCacheDir string `json:"blob_cache_dir,omitempty"`
+	// BlobCacheRole controls whether this instance reads from and/or writes to the blob cache.
+	// Valid values: "reader" (default, only read from cache), "writer" (read and write to cache).
+	// If BlobCacheDir is empty, this option is ignored.
+	BlobCacheRole string `json:"blob_cache_role,omitempty"`
 }
 
 // isRootlessDriver returns true if the given storage driver is valid for containers running as non root
@@ -323,6 +357,18 @@ func getRootlessStorageOpts(systemOpts StoreOptions) (StoreOptions, error) {
 	if opts.GraphDriverName == overlay2 {
 		logrus.Warnf("Switching default driver from overlay2 to the equivalent overlay driver")
 		opts.GraphDriverName = overlayDriver
+	}
+
+	// Copy blob cache options from system options (for both rootless and root)
+	opts.BlobCacheDir = systemOpts.BlobCacheDir
+	opts.BlobCacheRole = systemOpts.BlobCacheRole
+
+	// Environment variable overrides for blob cache (apply to rootless too)
+	if blobCacheDir, ok := os.LookupEnv("CONTAINERS_BLOB_CACHE_DIR"); ok {
+		opts.BlobCacheDir = blobCacheDir
+	}
+	if blobCacheRole, ok := os.LookupEnv("CONTAINERS_BLOB_CACHE_ROLE"); ok {
+		opts.BlobCacheRole = blobCacheRole
 	}
 
 	// If the configuration file was explicitly set, then copy all the options
@@ -414,17 +460,20 @@ func ReloadConfigurationFileIfNeeded(configFile string, storeOptions *StoreOptio
 func ReloadConfigurationFile(configFile string, storeOptions *StoreOptions) error {
 	config := new(TomlConfig)
 
+	logrus.Debugf("Loading storage configuration from: %s", configFile)
 	meta, err := toml.DecodeFile(configFile, &config)
 	if err == nil {
 		keys := meta.Undecoded()
 		if len(keys) > 0 {
 			logrus.Warningf("Failed to decode the keys %q from %q", keys, configFile)
 		}
+		logrus.Debugf("Loaded blob cache config from %s: BlobCacheDir=%q BlobCacheRole=%q", configFile, config.Storage.Options.BlobCacheDir, config.Storage.Options.BlobCacheRole)
 	} else {
 		if !os.IsNotExist(err) {
 			logrus.Warningf("Failed to read %s %v\n", configFile, err.Error())
 			return err
 		}
+		logrus.Debugf("Storage config file %s does not exist", configFile)
 	}
 
 	// Clear storeOptions of previous settings
@@ -493,8 +542,29 @@ func ReloadConfigurationFile(configFile string, storeOptions *StoreOptions) erro
 
 	storeOptions.DisableVolatile = config.Storage.Options.DisableVolatile
 	storeOptions.TransientStore = config.Storage.TransientStore
+	storeOptions.BlobCacheDir = config.Storage.Options.BlobCacheDir
+	if config.Storage.Options.BlobCacheRole == "" {
+		// Default to "reader" if not specified
+		storeOptions.BlobCacheRole = "reader"
+	} else {
+		storeOptions.BlobCacheRole = config.Storage.Options.BlobCacheRole
+	}
 
 	storeOptions.GraphDriverOptions = append(storeOptions.GraphDriverOptions, cfg.GetGraphDriverOptions(storeOptions.GraphDriverName, config.Storage.Options)...)
+
+	// Environment variable overrides for blob cache (override config file settings)
+	if blobCacheDir, ok := os.LookupEnv("CONTAINERS_BLOB_CACHE_DIR"); ok {
+		logrus.Debugf("Environment variable CONTAINERS_BLOB_CACHE_DIR=%q overriding config file value %q", blobCacheDir, storeOptions.BlobCacheDir)
+		storeOptions.BlobCacheDir = blobCacheDir
+	}
+	if blobCacheRole, ok := os.LookupEnv("CONTAINERS_BLOB_CACHE_ROLE"); ok {
+		logrus.Debugf("Environment variable CONTAINERS_BLOB_CACHE_ROLE=%q overriding config file value %q", blobCacheRole, storeOptions.BlobCacheRole)
+		storeOptions.BlobCacheRole = blobCacheRole
+	} else if storeOptions.BlobCacheDir != "" && storeOptions.BlobCacheRole == "" {
+		// Default to "reader" if dir is set but role is not (from env or config)
+		storeOptions.BlobCacheRole = "reader"
+		logrus.Debugf("Defaulting BlobCacheRole to 'reader' since BlobCacheDir is set but role is not")
+	}
 
 	if opts, ok := os.LookupEnv("STORAGE_OPTS"); ok {
 		storeOptions.GraphDriverOptions = strings.Split(opts, ",")

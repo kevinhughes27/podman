@@ -66,6 +66,7 @@ type storageImageDestination struct {
 	signatures            []byte                   // Signature contents, temporary
 	signatureses          map[digest.Digest][]byte // Instance signature contents, temporary
 	metadata              storageImageMetadata     // Metadata contents being built
+	blobCache             *blobCache               // Shared blob cache for avoiding re-processing
 
 	// Mapping from layer (by index) to the associated ID in the storage.
 	// It's protected *implicitly* since `commitLayer()`, at any given
@@ -144,6 +145,31 @@ func newImageDestination(sys *types.SystemContext, imageRef storageReference) (*
 	if err != nil {
 		return nil, fmt.Errorf("creating a temporary directory: %w", err)
 	}
+	// Get store options to check for blob cache configuration
+	var blobCache *blobCache
+	storeOptions, err := storage.DefaultStoreOptions()
+	if err != nil {
+		logrus.Debugf("Failed to get store options for blob cache: %v", err)
+	} else {
+		// Log which config file is being used (if we can determine it)
+		if configFile, err := storage.DefaultConfigFile(); err == nil {
+			logrus.Debugf("Storage config file: %s", configFile)
+		}
+		logrus.Debugf("Store options loaded in newImageDestination: BlobCacheDir=%q BlobCacheRole=%q (from config or env)", storeOptions.BlobCacheDir, storeOptions.BlobCacheRole)
+		// Check environment variables
+		if envDir, ok := os.LookupEnv("CONTAINERS_BLOB_CACHE_DIR"); ok {
+			logrus.Debugf("CONTAINERS_BLOB_CACHE_DIR environment variable: %q", envDir)
+		}
+		if envRole, ok := os.LookupEnv("CONTAINERS_BLOB_CACHE_ROLE"); ok {
+			logrus.Debugf("CONTAINERS_BLOB_CACHE_ROLE environment variable: %q", envRole)
+		}
+		if storeOptions.BlobCacheDir != "" {
+			logrus.Infof("Blob cache configured in newImageDestination: dir=%s role=%s", storeOptions.BlobCacheDir, storeOptions.BlobCacheRole)
+			blobCache = newBlobCache(imageRef.transport.store, storeOptions.BlobCacheDir, storeOptions.BlobCacheRole)
+		} else {
+			logrus.Debugf("Blob cache not configured in newImageDestination (BlobCacheDir is empty) - check storage.conf or environment variables")
+		}
+	}
 	dest := &storageImageDestination{
 		PropertyMethodsInitialize: impl.PropertyMethods(impl.Properties{
 			SupportedManifestMIMETypes: []string{
@@ -164,6 +190,7 @@ func newImageDestination(sys *types.SystemContext, imageRef storageReference) (*
 
 		imageRef:     imageRef,
 		directory:    directory,
+		blobCache:    blobCache,
 		signatureses: make(map[digest.Digest][]byte),
 		metadata: storageImageMetadata{
 			SignatureSizes:  []int{},
@@ -265,6 +292,56 @@ func (s *storageImageDestination) putBlobToPendingFile(stream io.Reader, blobinf
 		}
 	}
 
+	// Check shared blob cache first (if enabled and blob digest is known)
+	if s.blobCache != nil && s.blobCache.canRead() && blobinfo.Digest != "" {
+		logrus.Debugf("Checking shared blob cache for %s in putBlobToPendingFile", blobinfo.Digest)
+		cachePath, meta, err := s.blobCache.getCachedBlob(blobinfo.Digest)
+		if err != nil {
+			logrus.Debugf("Error checking blob cache for %s: %v", blobinfo.Digest, err)
+		} else if cachePath != "" && meta != nil {
+			// Found in cache, copy to temp directory
+			logrus.Debugf("Found blob %s in cache at %s (size=%d diffID=%s), copying to temp directory", blobinfo.Digest, cachePath, meta.Size, meta.DiffID)
+			filename := s.computeNextBlobCacheFile()
+			logrus.Debugf("Attempting to copy/link blob from cache %s to %s", cachePath, filename)
+			copyErr := copyOrLinkBlob(cachePath, filename)
+			if copyErr == nil {
+				// Verify file exists and has correct size
+				if fi, err := os.Stat(filename); err == nil {
+					logrus.Debugf("Blob copied successfully: %s -> %s (size=%d)", cachePath, filename, fi.Size())
+					// Verify the blob digest matches (basic sanity check)
+					// Record in lockProtected structures
+					s.lock.Lock()
+					s.lockProtected.blobDiffIDs[blobinfo.Digest] = meta.DiffID
+					s.lockProtected.fileSizes[blobinfo.Digest] = meta.Size
+					s.lockProtected.filenames[blobinfo.Digest] = filename
+					s.lock.Unlock()
+					// Record in cache
+					options.Cache.RecordDigestUncompressedPair(blobinfo.Digest, meta.DiffID)
+					logrus.Infof("Reused blob %s from shared cache in putBlobToPendingFile", blobinfo.Digest)
+					return private.UploadedBlob{
+						Digest: blobinfo.Digest,
+						Size:   meta.Size,
+					}, nil
+				} else {
+					logrus.Warnf("Blob copy reported success but file not found: %s (error: %v), falling back to normal processing", filename, err)
+					// Fall through to normal processing
+				}
+			}
+			// If copy failed, fall through to normal processing
+			logrus.Warnf("Failed to copy blob %s from cache %s to %s, falling back to normal processing: %v", blobinfo.Digest, cachePath, filename, copyErr)
+		} else {
+			logrus.Debugf("Blob %s not found in cache (cachePath=%q meta=%v err=%v)", blobinfo.Digest, cachePath, meta != nil, err)
+		}
+	} else {
+		if s.blobCache == nil {
+			logrus.Debugf("Blob cache not available for %s (blobCache is nil)", blobinfo.Digest)
+		} else if !s.blobCache.canRead() {
+			logrus.Debugf("Blob cache read not enabled for %s", blobinfo.Digest)
+		} else if blobinfo.Digest == "" {
+			logrus.Debugf("Blob digest not available for cache lookup")
+		}
+	}
+
 	// Set up to digest the blob if necessary, and count its size while saving it to a file.
 	filename := s.computeNextBlobCacheFile()
 	file, err := os.OpenFile(filename, os.O_CREATE|os.O_TRUNC|os.O_WRONLY|os.O_EXCL, 0600)
@@ -287,7 +364,6 @@ func (s *storageImageDestination) putBlobToPendingFile(stream io.Reader, blobinf
 			return "", "", 0, fmt.Errorf("setting up to decompress blob: %w", err)
 
 		}
-		defer decompressed.Close()
 
 		diffID := digest.Canonical.Digester()
 		// Copy the data to the file.
@@ -321,6 +397,22 @@ func (s *storageImageDestination) putBlobToPendingFile(stream io.Reader, blobinf
 	// This is safe because we have just computed diffID, and blobDigest was either computed
 	// by us, or validated by the caller (usually copy.digestingReader).
 	options.Cache.RecordDigestUncompressedPair(blobDigest, diffID)
+
+	// Optionally save to shared cache if write is enabled
+	if s.blobCache != nil && s.blobCache.canWrite() {
+		logrus.Debugf("Saving blob %s to shared cache (size=%d diffID=%s)", blobDigest, count, diffID)
+		if err := s.blobCache.saveBlobToCache(filename, blobDigest, diffID, count); err != nil {
+			// Non-fatal: log and continue
+			logrus.Warnf("Failed to save blob %s to shared cache: %v", blobDigest, err)
+		}
+	} else {
+		if s.blobCache == nil {
+			logrus.Debugf("Blob cache not available, not saving %s", blobDigest)
+		} else if !s.blobCache.canWrite() {
+			logrus.Debugf("Blob cache write not enabled (role=%s), not saving %s", s.blobCache.role, blobDigest)
+		}
+	}
+
 	return private.UploadedBlob{
 		Digest: blobDigest,
 		Size:   blobSize,
@@ -600,6 +692,39 @@ func (s *storageImageDestination) tryReusingBlobAsPending(blobDigest digest.Dige
 			Digest: blobDigest,
 			Size:   size,
 		}, nil
+	}
+
+	// Check shared blob cache (if enabled)
+	if s.blobCache != nil && s.blobCache.canRead() {
+		logrus.Debugf("Checking shared blob cache for %s in TryReusingBlob", blobDigest)
+		cachePath, meta, err := s.blobCache.getCachedBlob(blobDigest)
+		if err != nil {
+			logrus.Debugf("Error checking blob cache for %s in TryReusingBlob: %v", blobDigest, err)
+		} else if cachePath != "" && meta != nil {
+			// Found in cache, copy to temp directory and record
+			logrus.Debugf("Found blob %s in cache, copying to temp directory", blobDigest)
+			filename := s.computeNextBlobCacheFile()
+			if err := copyOrLinkBlob(cachePath, filename); err == nil {
+				s.lockProtected.blobDiffIDs[blobDigest] = meta.DiffID
+				s.lockProtected.fileSizes[blobDigest] = meta.Size
+				s.lockProtected.filenames[blobDigest] = filename
+				logrus.Infof("Reused blob %s from shared cache in TryReusingBlob", blobDigest)
+				return true, private.ReusedBlob{
+					Digest: blobDigest,
+					Size:   meta.Size,
+				}, nil
+			}
+			// If copy failed, fall through to other checks
+			logrus.Debugf("Failed to copy blob %s from cache to %s in TryReusingBlob: %v", blobDigest, filename, err)
+		} else {
+			logrus.Debugf("Blob %s not found in cache in TryReusingBlob (cachePath=%s meta=%v)", blobDigest, cachePath, meta != nil)
+		}
+	} else {
+		if s.blobCache == nil {
+			logrus.Debugf("Blob cache not available in TryReusingBlob for %s (blobCache is nil)", blobDigest)
+		} else if !s.blobCache.canRead() {
+			logrus.Debugf("Blob cache read not enabled in TryReusingBlob for %s", blobDigest)
+		}
 	}
 
 	layers, err := s.imageRef.transport.store.LayersByUncompressedDigest(blobDigest)
