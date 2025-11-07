@@ -14,6 +14,7 @@ import (
 	"slices"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	digest "github.com/opencontainers/go-digest"
 	imgspecv1 "github.com/opencontainers/image-spec/specs-go/v1"
@@ -229,10 +230,21 @@ func (s *storageImageDestination) NoteOriginalOCIConfig(ociConfig *imgspecv1.Ima
 // to any other readers for download using the supplied digest.
 // If stream.Read() at any time, ESPECIALLY at end of input, returns an error, PutBlob MUST 1) fail, and 2) delete any data stored so far.
 func (s *storageImageDestination) PutBlobWithOptions(ctx context.Context, stream io.Reader, blobinfo types.BlobInfo, options private.PutBlobOptions) (private.UploadedBlob, error) {
+	startTime := time.Now()
+	var blobSize int64
+	defer func() {
+		duration := time.Since(startTime)
+		logrus.Infof("PERF:   image/v5/storage/storage_dest.go PutBlobWithOptions digest=%v size=%d total=%v", blobinfo.Digest, blobSize, duration)
+	}()
+
+	putBlobFileStart := time.Now()
 	info, err := s.putBlobToPendingFile(stream, blobinfo, &options)
 	if err != nil {
 		return info, err
 	}
+	blobSize = info.Size
+	duration := time.Since(putBlobFileStart)
+	logrus.Infof("PERF:   image/v5/storage/storage_dest.go putBlobToPendingFile digest=%v total=%v", blobinfo.Digest, duration)
 
 	if options.IsConfig {
 		s.lock.Lock()
@@ -282,20 +294,26 @@ func (s *storageImageDestination) putBlobToPendingFile(stream io.Reader, blobinf
 		counter := ioutils.NewWriteCounter(file)
 		stream = io.TeeReader(stream, counter)
 		digester, stream := putblobdigest.DigestIfUnknown(stream, blobinfo)
+		decompressStart := time.Now()
 		decompressed, err := archive.DecompressStream(stream)
 		if err != nil {
 			return "", "", 0, fmt.Errorf("setting up to decompress blob: %w", err)
 
 		}
-		defer decompressed.Close()
+		decompressDuration := time.Since(decompressStart)
 
 		diffID := digest.Canonical.Digester()
 		// Copy the data to the file.
 		// TODO: This can take quite some time, and should ideally be cancellable using context.Context.
+		diskWriteStart := time.Now()
 		_, err = io.Copy(diffID.Hash(), decompressed)
 		if err != nil {
 			return "", "", 0, fmt.Errorf("storing blob to file %q: %w", filename, err)
 		}
+		diskWriteDuration := time.Since(diskWriteStart)
+
+		logrus.Infof("PERF:    image/v5/storage/storage_dest.go PutBlobDiskWrite digest=%s dst=%v total=%v", blobinfo.Digest.String(), filename, diskWriteDuration)
+		logrus.Infof("PERF:    image/v5/storage/storage_dest.go PutBlobDecompress digest=%s total=%v", blobinfo.Digest.String(), decompressDuration)
 
 		return digester.Digest(), diffID.Digest(), counter.Count, nil
 	}()
@@ -948,6 +966,11 @@ func (s *storageImageDestination) queueOrCommit(index int, info addedLayerInfo) 
 // must guarantee that, at any given time, at most one goroutine may execute
 // `commitLayer()`.
 func (s *storageImageDestination) commitLayer(index int, info addedLayerInfo, size int64) (bool, error) {
+	// startTime := time.Now()
+	// defer func() {
+	// 	duration := time.Since(startTime)
+	// 	logrus.Infof("PERF:   image/v5/storage/storage_dest.go commitLayer digest=%v total=%v", info.digest, duration)
+	// }()
 	if _, alreadyCommitted := s.indexToStorageID[index]; alreadyCommitted {
 		return false, nil
 	}
@@ -1045,6 +1068,7 @@ func (s *storageImageDestination) commitLayer(index int, info addedLayerInfo, si
 		return false, nil
 	}
 
+	createStartTime := time.Now()
 	layer, err := s.createNewLayer(index, trusted, parentLayer, id)
 	if err != nil {
 		return false, err
@@ -1053,6 +1077,8 @@ func (s *storageImageDestination) commitLayer(index int, info addedLayerInfo, si
 		return true, nil
 	}
 	s.indexToStorageID[index] = layer.ID
+	duration := time.Since(createStartTime)
+	logrus.Infof("PERF:   image/v5/storage/storage_dest.go createNewLayer digest=%v total=%v", info.digest, duration)
 	return false, nil
 }
 
@@ -1078,6 +1104,12 @@ func layerID(parentID string, trusted trustedLayerIdentityData) string {
 // createNewLayer creates a new layer newLayerID for (index, trusted) on top of parentLayer (which may be "").
 // If the layer cannot be committed yet, the function returns (nil, nil).
 func (s *storageImageDestination) createNewLayer(index int, trusted trustedLayerIdentityData, parentLayer, newLayerID string) (*storage.Layer, error) {
+	// dont have matching digest here
+	// startTime := time.Now()
+	// defer func() {
+	// 	duration := time.Since(startTime)
+	// 	logrus.Infof("PERF:   image/v5/storage/storage_dest.go createNewLayer digest=%v total=%v", layer.ID , duration)
+	// }()
 	s.lock.Lock()
 	diffOutput, ok := s.lockProtected.diffOutputs[index]
 	s.lock.Unlock()

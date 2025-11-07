@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/sirupsen/logrus"
 	"go.podman.io/image/v5/internal/private"
@@ -104,7 +105,10 @@ func (ic *imageCopier) copyBlobFromStream(ctx context.Context, srcReader io.Read
 	if !isConfig {
 		options.LayerIndex = &layerIndex
 	}
+	putBlobStart := time.Now()
 	destBlob, err := ic.c.dest.PutBlobWithOptions(ctx, &errorAnnotationReader{stream.reader}, stream.info, options)
+	totalDuration := time.Since(putBlobStart)
+	logrus.Infof("PERF:   image/v5/copy/blob.go PutBlobWithOptions digest=%v total=%v", srcInfo.Digest, totalDuration)
 	if err != nil {
 		return types.BlobInfo{}, fmt.Errorf("writing blob: %w", err)
 	}

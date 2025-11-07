@@ -4,6 +4,7 @@ package integration
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -14,7 +15,38 @@ import (
 	. "github.com/onsi/gomega/gexec"
 )
 
-var _ = Describe("Podman pull", func() {
+var _ = FDescribe("Podman pull", func() {
+
+	FIt("podman pull perf", func() {
+		// Create log file for performance data in working directory
+		cwd, err := os.Getwd()
+		Expect(err).ToNot(HaveOccurred())
+		logFile := filepath.Join(cwd, "pull_perf.log")
+		f, err := os.Create(logFile)
+		Expect(err).ToNot(HaveOccurred())
+		defer f.Close()
+
+		// Create profile files in working directory
+		// cpuProfile := filepath.Join(cwd, "pull_cpu.prof")
+		// memProfile := filepath.Join(cwd, "pull_mem.prof")
+
+		// Create a multi-writer that writes to both file and GinkgoWriter
+		multiWriter := io.MultiWriter(f, GinkgoWriter)
+
+		// Pass --log-level=info and profiling flags to podman
+		// session := podmanTest.PodmanExecBaseWithOptions([]string{"--log-level=info", "--cpu-profile", cpuProfile, "--memory-profile", memProfile, "pull", "quay.io/containers/podman@sha256:7dbeb8b7a8f83ef96bad4c4f04fbdecedc65d36a5c6953a1861eb94386f3c4ec"}, PodmanExecOptions{
+		session := podmanTest.PodmanExecBaseWithOptions([]string{"--log-level=info", "pull", "quay.io/containers/podman@sha256:7dbeb8b7a8f83ef96bad4c4f04fbdecedc65d36a5c6953a1861eb94386f3c4ec"}, PodmanExecOptions{
+			FullOutputWriter: multiWriter,
+		})
+		session.WaitWithDefaultTimeout()
+		// Expect(session).Should(ExitCleanly())
+		Expect(session.ExitCode()).Should(Equal(0))
+
+		rmiSession := podmanTest.Podman([]string{"rmi", "podman@sha256:7dbeb8b7a8f83ef96bad4c4f04fbdecedc65d36a5c6953a1861eb94386f3c4ec"})
+		rmiSession.WaitWithDefaultTimeout()
+		// Expect(rmiSession).Should(ExitCleanly())
+		Expect(session.ExitCode()).Should(Equal(0))
+	})
 
 	It("podman pull multiple images with/without tag/digest", func() {
 		session := podmanTest.Podman([]string{"pull", "-q", "busybox:musl", "alpine", "alpine:latest", "quay.io/libpod/cirros", "quay.io/libpod/testdigest_v2s2@sha256:755f4d90b3716e2bf57060d249e2cd61c9ac089b1233465c5c2cb2d7ee550fdb"})

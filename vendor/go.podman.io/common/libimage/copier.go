@@ -352,6 +352,11 @@ func (c *Copier) Close() error {
 // Copy the source to the destination.  Returns the bytes of the copied
 // manifest which may be used for digest computation.
 func (c *Copier) Copy(ctx context.Context, source, destination types.ImageReference) ([]byte, error) {
+	// totalStart := time.Now()
+	// defer func() {
+	// 	totalDuration := time.Since(totalStart)
+	// 	logrus.Infof("PERF: common/libimage/copier.go Copy image=%s total=%v", source.StringWithinTransport(), totalDuration)
+	// }()
 	return c.copyInternal(ctx, source, destination, nil)
 }
 

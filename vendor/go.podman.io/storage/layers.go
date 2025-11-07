@@ -1380,6 +1380,12 @@ func (r *layerStore) pickStoreLocation(volatile, writeable bool) layerLocations 
 
 // Requires startWriting.
 func (r *layerStore) create(id string, parentLayer *Layer, names []string, mountLabel string, options map[string]string, moreOptions *LayerOptions, writeable bool, diff io.Reader, slo *stagedLayerOptions) (layer *Layer, size int64, err error) {
+	totalStart := time.Now()
+	defer func() {
+		totalDuration := time.Since(totalStart)
+		logrus.Infof("PERF:     storage/layers.go create digest=%v total=%v", moreOptions.OriginalDigest, totalDuration)
+	}()
+
 	if moreOptions == nil {
 		moreOptions = &LayerOptions{}
 	}
@@ -2400,6 +2406,12 @@ func (r *layerStore) ApplyDiff(to string, diff io.Reader) (size int64, err error
 
 // Requires startWriting.
 func (r *layerStore) applyDiffWithOptions(to string, layerOptions *LayerOptions, diff io.Reader) (size int64, err error) {
+	startTime := time.Now()
+	defer func() {
+		duration := time.Since(startTime)
+		logrus.Infof("PERF:     storage/layers.go applyDiffWithOptions digest=%v total=%v", layerOptions.OriginalDigest, duration)
+	}()
+
 	if !r.lockfile.IsReadWrite() {
 		return -1, fmt.Errorf("not allowed to modify layer contents at %q: %w", r.layerdir, ErrStoreIsReadOnly)
 	}
@@ -2461,7 +2473,6 @@ func (r *layerStore) applyDiffWithOptions(to string, layerOptions *LayerOptions,
 		if err != nil {
 			return -1, err
 		}
-		defer uncompressed.Close()
 		idLogger, err := tarlog.NewLogger(func(h *tar.Header) {
 			if !strings.HasPrefix(path.Base(h.Name), archive.WhiteoutPrefix) {
 				uidLog[uint32(h.Uid)] = struct{}{}

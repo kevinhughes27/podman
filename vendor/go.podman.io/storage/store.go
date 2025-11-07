@@ -1453,6 +1453,12 @@ func (s *store) canUseShifting(uidmap, gidmap []idtools.IDMap) bool {
 // - rlstore must be locked for writing
 // - rlstores MUST NOT be locked
 func (s *store) putLayer(rlstore rwLayerStore, rlstores []roLayerStore, id, parent string, names []string, mountLabel string, writeable bool, lOptions *LayerOptions, diff io.Reader, slo *stagedLayerOptions) (*Layer, int64, error) {
+	totalStart := time.Now()
+	defer func() {
+		totalDuration := time.Since(totalStart)
+		logrus.Infof("PERF:     storage/store.go putLayer digest=%v total=%v", lOptions.OriginalDigest, totalDuration)
+	}()
+
 	var parentLayer *Layer
 	var options LayerOptions
 	if lOptions != nil {

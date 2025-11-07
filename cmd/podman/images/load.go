@@ -7,11 +7,13 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/containers/podman/v6/cmd/podman/registry"
 	"github.com/containers/podman/v6/cmd/podman/validate"
 	"github.com/containers/podman/v6/pkg/domain/entities"
 	"github.com/containers/podman/v6/pkg/util"
+	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"go.podman.io/common/pkg/completion"
 	"go.podman.io/common/pkg/download"
@@ -71,6 +73,12 @@ func loadFlags(cmd *cobra.Command) {
 }
 
 func load(_ *cobra.Command, _ []string) error {
+	startTime := time.Now()
+	defer func() {
+		duration := time.Since(startTime)
+		logrus.Infof("PERF: loadCmd duration=%v", duration)
+	}()
+
 	if len(loadOpts.Input) > 0 {
 		// Download the input file if needed.
 		if strings.HasPrefix(loadOpts.Input, "https://") || strings.HasPrefix(loadOpts.Input, "http://") {

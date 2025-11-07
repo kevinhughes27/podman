@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	digest "github.com/opencontainers/go-digest"
 	imgspecv1 "github.com/opencontainers/image-spec/specs-go/v1"
@@ -434,6 +435,12 @@ func (ic *imageCopier) compareImageDestinationManifestEqual(ctx context.Context,
 
 // copyLayers copies layers from ic.src/ic.c.rawSource to dest, using and updating ic.manifestUpdates if necessary and ic.cannotModifyManifestReason == "".
 func (ic *imageCopier) copyLayers(ctx context.Context) ([]compressiontypes.Algorithm, error) {
+	totalStart := time.Now()
+	defer func() {
+		totalDuration := time.Since(totalStart)
+		logrus.Infof("PERF: copyLayers total=%v", totalDuration)
+	}()
+
 	srcInfos := ic.src.LayerInfos()
 	updatedSrcInfos, err := ic.src.LayerInfosForCopy(ctx)
 	if err != nil {
@@ -694,6 +701,11 @@ func compressionEditsFromBlobInfo(srcInfo types.BlobInfo) (types.LayerCompressio
 // and returns a complete blobInfo of the copied layer, and a value for LayerDiffIDs if diffIDIsNeeded
 // srcRef can be used as an additional hint to the destination during checking whether a layer can be reused but srcRef can be nil.
 func (ic *imageCopier) copyLayer(ctx context.Context, srcInfo types.BlobInfo, toEncrypt bool, pool *mpb.Progress, layerIndex int, srcRef reference.Named, emptyLayer bool) (types.BlobInfo, digest.Digest, error) {
+	totalStart := time.Now()
+	defer func() {
+		totalDuration := time.Since(totalStart)
+		logrus.Infof("PERF: image/v5/copy/single.go copyLayer digest=%v size=%v total=%v", srcInfo.Digest, srcInfo.Size, totalDuration)
+	}()
 	// If the srcInfo doesn't contain compression information, try to compute it from the
 	// MediaType, which was either read from a manifest by way of LayerInfos() or constructed
 	// by LayerInfosForCopy(), if it was supplied at all.  If we succeed in copying the blob,
@@ -850,13 +862,20 @@ func (ic *imageCopier) copyLayer(ctx context.Context, srcInfo types.BlobInfo, to
 		}
 		defer bar.Abort(false)
 
+		getBlobStart := time.Now()
 		srcStream, srcBlobSize, err := ic.c.rawSource.GetBlob(ctx, srcInfo, ic.c.blobInfoCache)
+		getBlobDuration := time.Since(getBlobStart)
 		if err != nil {
 			return types.BlobInfo{}, "", fmt.Errorf("reading blob %s: %w", srcInfo.Digest, err)
 		}
 		defer srcStream.Close()
 
+		copyStart := time.Now()
 		blobInfo, diffIDChan, err := ic.copyLayerFromStream(ctx, srcStream, types.BlobInfo{Digest: srcInfo.Digest, Size: srcBlobSize, MediaType: srcInfo.MediaType, Annotations: srcInfo.Annotations}, diffIDIsNeeded, toEncrypt, bar, layerIndex, emptyLayer)
+		copyDuration := time.Since(copyStart)
+		logrus.Infof("PERF:  image/v5/copy/single.go copyLayerFromStream digest=%v total=%v", srcInfo.Digest, copyDuration)
+		// log out of order down here. most other logs need to be re-order in reverse to make more sense, so when this gets re-ordered it does too
+		logrus.Infof("PERF:  image/v5/copy/single.go GetBlob digest=%v size=%v total=%v", srcInfo.Digest, srcBlobSize, getBlobDuration)
 		if err != nil {
 			return types.BlobInfo{}, "", err
 		}
