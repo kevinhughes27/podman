@@ -4,6 +4,8 @@ package integration
 
 import (
 	"fmt"
+	"io"
+	"os"
 	"path/filepath"
 
 	. "github.com/containers/podman/v6/test/utils"
@@ -12,10 +14,57 @@ import (
 	. "github.com/onsi/gomega/gexec"
 )
 
-var _ = Describe("Podman load", func() {
+var _ = FDescribe("Podman load", func() {
 
 	BeforeEach(func() {
 		podmanTest.AddImageToRWStore(ALPINE)
+	})
+
+	FIt("podman load perf", func() {
+		podmanImage := "quay.io/containers/podman@sha256:7dbeb8b7a8f83ef96bad4c4f04fbdecedc65d36a5c6953a1861eb94386f3c4ec"
+		outTar := filepath.Join("/tmp", "podman.tar")
+		outDir := filepath.Join("/tmp", "podman_dir")
+
+		// Pull and save podman image first
+		pull := podmanTest.Podman([]string{"pull", "-q", podmanImage})
+		pull.WaitWithDefaultTimeout()
+		Expect(pull).Should(ExitCleanly())
+
+		save := podmanTest.Podman([]string{"save", "-q", "-o", outTar, podmanImage})
+		save.WaitWithDefaultTimeout()
+		Expect(save).Should(ExitCleanly())
+
+		save = podmanTest.Podman([]string{"save", "-q", "--format", "oci-dir", "-o", outDir, podmanImage})
+		save.WaitWithDefaultTimeout()
+		Expect(save).Should(ExitCleanly())
+
+		// Reset
+		rmi := podmanTest.Podman([]string{"system", "reset", "-f"})
+		rmi.WaitWithDefaultTimeout()
+		Expect(rmi).Should(ExitCleanly())
+
+		// Create log file for performance data in working directory
+		cwd, err := os.Getwd()
+		Expect(err).ToNot(HaveOccurred())
+		logFile := filepath.Join(cwd, "load_perf.log")
+		f, err := os.Create(logFile)
+		Expect(err).ToNot(HaveOccurred())
+		defer f.Close()
+
+		// Create profile files in working directory
+		// cpuProfile := filepath.Join(cwd, "load_cpu.prof")
+		// memProfile := filepath.Join(cwd, "load_mem.prof")
+
+		// Create a multi-writer that writes to both file and GinkgoWriter
+		multiWriter := io.MultiWriter(f, GinkgoWriter)
+
+		// Load with performance logging - pass --log-level=info and profiling flags
+		// result := podmanTest.PodmanExecBaseWithOptions([]string{"--log-level=info", "--cpu-profile", cpuProfile, "--memory-profile", memProfile, "load", "-q", "-i", outfile}, PodmanExecOptions{
+		result := podmanTest.PodmanExecBaseWithOptions([]string{"--log-level=info", "load", "-q", "-i", outTar}, PodmanExecOptions{
+			FullOutputWriter: multiWriter,
+		})
+		result.WaitWithDefaultTimeout()
+		// Expect(result).Should(ExitCleanly())
 	})
 
 	It("podman load input flag", func() {

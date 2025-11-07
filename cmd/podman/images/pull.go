@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/containers/buildah/pkg/cli"
 	"github.com/containers/podman/v6/cmd/podman/common"
@@ -12,6 +13,7 @@ import (
 	"github.com/containers/podman/v6/cmd/podman/utils"
 	"github.com/containers/podman/v6/pkg/domain/entities"
 	"github.com/containers/podman/v6/pkg/util"
+	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"go.podman.io/common/pkg/auth"
 	"go.podman.io/common/pkg/completion"
@@ -142,6 +144,12 @@ func pullFlags(cmd *cobra.Command) {
 
 // imagePull is implement the command for pulling images.
 func imagePull(cmd *cobra.Command, args []string) error {
+	startTime := time.Now()
+	defer func() {
+		duration := time.Since(startTime)
+		logrus.Infof("PERF: pullCmd duration=%v", duration)
+	}()
+
 	// TLS verification in c/image is controlled via a `types.OptionalBool`
 	// which allows for distinguishing among set-true, set-false, unspecified
 	// which is important to implement a sane way of dealing with defaults of
