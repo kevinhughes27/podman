@@ -29,6 +29,23 @@ import (
 	"go.podman.io/storage"
 )
 
+var (
+	// defaultBlobCacheWrapper is set by podman to enable blob caching
+	defaultBlobCacheWrapper LookupReferenceFunc
+)
+
+// SetDefaultBlobCacheWrapper sets the default blob cache wrapper function
+// that will be used for all storage destinations when DestinationLookupReferenceFunc
+// is not explicitly set in CopyOptions.
+func SetDefaultBlobCacheWrapper(wrapper LookupReferenceFunc) {
+	defaultBlobCacheWrapper = wrapper
+}
+
+// getDefaultBlobCacheWrapper returns the default blob cache wrapper if set
+func getDefaultBlobCacheWrapper() LookupReferenceFunc {
+	return defaultBlobCacheWrapper
+}
+
 const (
 	defaultMaxRetries = 3
 	defaultRetryDelay = time.Second
@@ -179,6 +196,10 @@ type Copier struct {
 // Note that fields in options *may* overwrite the counterparts of
 // the specified system context.  Please make sure to call `(*Copier).Close()`.
 func (r *Runtime) newCopier(options *CopyOptions) (*Copier, error) {
+	// Set default blob cache wrapper for storage destinations if not already set
+	if options != nil && options.DestinationLookupReferenceFunc == nil {
+		options.DestinationLookupReferenceFunc = getDefaultBlobCacheWrapper()
+	}
 	return NewCopier(options, r.SystemContext())
 }
 
