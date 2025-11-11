@@ -20,6 +20,7 @@ import (
 	"go.podman.io/common/pkg/retry"
 	"go.podman.io/image/v5/copy"
 	"go.podman.io/image/v5/docker/reference"
+	"go.podman.io/image/v5/pkg/blobcache"
 	"go.podman.io/image/v5/pkg/compression"
 	"go.podman.io/image/v5/signature"
 	"go.podman.io/image/v5/signature/signer"
@@ -28,23 +29,6 @@ import (
 	"go.podman.io/image/v5/types"
 	"go.podman.io/storage"
 )
-
-var (
-	// defaultBlobCacheWrapper is set by podman to enable blob caching
-	defaultBlobCacheWrapper LookupReferenceFunc
-)
-
-// SetDefaultBlobCacheWrapper sets the default blob cache wrapper function
-// that will be used for all storage destinations when DestinationLookupReferenceFunc
-// is not explicitly set in CopyOptions.
-func SetDefaultBlobCacheWrapper(wrapper LookupReferenceFunc) {
-	defaultBlobCacheWrapper = wrapper
-}
-
-// getDefaultBlobCacheWrapper returns the default blob cache wrapper if set
-func getDefaultBlobCacheWrapper() LookupReferenceFunc {
-	return defaultBlobCacheWrapper
-}
 
 const (
 	defaultMaxRetries = 3
@@ -196,9 +180,26 @@ type Copier struct {
 // Note that fields in options *may* overwrite the counterparts of
 // the specified system context.  Please make sure to call `(*Copier).Close()`.
 func (r *Runtime) newCopier(options *CopyOptions) (*Copier, error) {
-	// Set default blob cache wrapper for storage destinations if not already set
-	if options != nil && options.DestinationLookupReferenceFunc == nil {
-		options.DestinationLookupReferenceFunc = getDefaultBlobCacheWrapper()
+	// Set default blob cache wrapper from runtime if set
+	if blobCacheDir := r.store.BlobCacheDir(); blobCacheDir != "" {
+		wrapper := func(ref types.ImageReference) (types.ImageReference, error) {
+			// Only wrap storage transport references
+			if ref.Transport().Name() != storageTransport.Transport.Name() {
+				return ref, nil
+			}
+
+			logrus.Debugf("Wrapping storage reference with blob cache: directory=%s", blobCacheDir)
+			// We use PreserveOriginal compression to match the storage destination's behavior
+			cachedRef, err := blobcache.NewBlobCache(ref, blobCacheDir, types.PreserveOriginal)
+			if err != nil {
+				logrus.Warnf("Failed to create blob cache wrapper: %v, using direct storage reference", err)
+				return ref, nil
+			}
+
+			return cachedRef, nil
+		}
+
+		options.DestinationLookupReferenceFunc = wrapper
 	}
 	return NewCopier(options, r.SystemContext())
 }

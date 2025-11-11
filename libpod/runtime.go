@@ -39,10 +39,8 @@ import (
 	artStore "go.podman.io/common/pkg/libartifact/store"
 	"go.podman.io/common/pkg/secrets"
 	systemdCommon "go.podman.io/common/pkg/systemd"
-	"go.podman.io/image/v5/pkg/blobcache"
 	"go.podman.io/image/v5/pkg/sysregistriesv2"
 	is "go.podman.io/image/v5/storage"
-	storageTransport "go.podman.io/image/v5/storage"
 	"go.podman.io/image/v5/types"
 	"go.podman.io/storage"
 	"go.podman.io/storage/pkg/fileutils"
@@ -52,55 +50,6 @@ import (
 
 // Set up the JSON library for all of Libpod
 var json = jsoniter.ConfigCompatibleWithStandardLibrary
-
-var (
-	// blobCacheDirCache is cached to avoid constant reloading of store options
-	blobCacheDirCache     string
-	blobCacheDirCacheOnce sync.Once
-)
-
-// getBlobCacheDir returns the configured blob cache directory from store options.
-// The result is cached to avoid constant reloading.
-func getBlobCacheDir() string {
-	blobCacheDirCacheOnce.Do(func() {
-		storeOptions, err := storage.DefaultStoreOptions()
-		if err != nil {
-			logrus.Debugf("Failed to get store options for blob cache: %v", err)
-			return
-		}
-
-		if storeOptions.BlobCacheDir != "" {
-			blobCacheDirCache = storeOptions.BlobCacheDir
-			logrus.Debugf("Blob cache directory from storage.conf: %q", storeOptions.BlobCacheDir)
-		}
-	})
-	return blobCacheDirCache
-}
-
-// wrapStorageReferenceWithBlobCache wraps a storage reference with a blobcache if configured.
-// This is used as a DestinationLookupReferenceFunc to enable blob caching for storage destinations.
-func wrapStorageReferenceWithBlobCache(ref types.ImageReference) (types.ImageReference, error) {
-	// Only wrap storage transport references
-	if ref.Transport().Name() != storageTransport.Transport.Name() {
-		return ref, nil
-	}
-
-	blobCacheDir := getBlobCacheDir()
-	if blobCacheDir == "" {
-		return ref, nil
-	}
-
-	logrus.Debugf("Wrapping storage reference with blob cache: directory=%s", blobCacheDir)
-	// Create a blobcache wrapper around the storage reference
-	// We use PreserveOriginal compression to match the storage destination's behavior
-	cachedRef, err := blobcache.NewBlobCache(ref, blobCacheDir, types.PreserveOriginal)
-	if err != nil {
-		logrus.Warnf("Failed to create blob cache wrapper: %v, using direct storage reference", err)
-		return ref, nil
-	}
-
-	return cachedRef, nil
-}
 
 // A RuntimeOption is a functional option which alters the Runtime created by
 // NewRuntime
@@ -975,11 +924,6 @@ func (r *Runtime) configureStore() error {
 		return err
 	}
 	r.libimageRuntime = libimageRuntime
-
-	// Set up default blob cache wrapper for storage destinations if configured
-	// This ensures blob caching works for all code paths (CLI, libpod, API, load, etc.)
-	libimage.SetDefaultBlobCacheWrapper(wrapStorageReferenceWithBlobCache)
-
 	// Run the libimage events routine.
 	r.libimageEvents()
 
