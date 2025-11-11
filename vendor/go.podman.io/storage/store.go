@@ -199,6 +199,7 @@ type Store interface {
 	TransientStore() bool
 	GraphDriverName() string
 	GraphOptions() []string
+	BlobCacheDir() string
 	PullOptions() map[string]string
 	UIDMap() []idtools.IDMap
 	GIDMap() []idtools.IDMap
@@ -774,6 +775,7 @@ type store struct {
 	digestLockRoot  string
 	disableVolatile bool
 	transientStore  bool
+	blobCacheDir    string
 
 	// The following fields can only be accessed with graphLock held.
 	graphLockLastWrite lockfile.LastWrite
@@ -905,6 +907,7 @@ func GetStore(options types.StoreOptions) (Store, error) {
 		autoNsMaxSize:       autoNsMaxSize,
 		disableVolatile:     options.DisableVolatile,
 		transientStore:      options.TransientStore,
+		blobCacheDir:        options.BlobCacheDir,
 
 		additionalUIDs: nil,
 		additionalGIDs: nil,
@@ -940,6 +943,10 @@ func (s *store) TransientStore() bool {
 
 func (s *store) GraphOptions() []string {
 	return s.graphOptions
+}
+
+func (s *store) BlobCacheDir() string {
+	return s.blobCacheDir
 }
 
 func (s *store) PullOptions() map[string]string {

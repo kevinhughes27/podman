@@ -270,6 +270,9 @@ type StoreOptions struct {
 	DisableVolatile bool `json:"disable-volatile,omitempty"`
 	// If transient, don't persist containers over boot (stores db in runroot)
 	TransientStore bool `json:"transient_store,omitempty"`
+	// BlobCacheDir is the directory for caching uncompressed blob files
+	// to avoid re-processing them for each user. If empty, blob caching is disabled.
+	BlobCacheDir string `json:"blob_cache_dir,omitempty"`
 }
 
 // isRootlessDriver returns true if the given storage driver is valid for containers running as non root
@@ -361,6 +364,8 @@ func getRootlessStorageOpts(systemOpts StoreOptions) (StoreOptions, error) {
 			opts.GraphDriverPriority = systemOpts.GraphDriverPriority
 		}
 	}
+
+	opts.BlobCacheDir = systemOpts.BlobCacheDir
 
 	if os.Getenv("STORAGE_OPTS") != "" {
 		opts.GraphDriverOptions = slices.AppendSeq(opts.GraphDriverOptions, strings.SplitSeq(os.Getenv("STORAGE_OPTS"), ","))
@@ -493,6 +498,8 @@ func ReloadConfigurationFile(configFile string, storeOptions *StoreOptions) erro
 
 	storeOptions.DisableVolatile = config.Storage.Options.DisableVolatile
 	storeOptions.TransientStore = config.Storage.TransientStore
+
+	storeOptions.BlobCacheDir = config.Storage.Options.BlobCacheDir
 
 	storeOptions.GraphDriverOptions = append(storeOptions.GraphDriverOptions, cfg.GetGraphDriverOptions(storeOptions.GraphDriverName, config.Storage.Options)...)
 

@@ -123,6 +123,10 @@ type OptionsConfig struct {
 
 	// DisableVolatile doesn't allow volatile mounts when it is set.
 	DisableVolatile bool `toml:"disable-volatile,omitempty"`
+
+	// BlobCacheDir is the directory for caching blob files to avoid re-processing them for each user.
+	// If empty, blob caching is disabled.
+	BlobCacheDir string `toml:"blob_cache_dir,omitempty"`
 }
 
 // GetGraphDriverOptions returns the driver specific options
